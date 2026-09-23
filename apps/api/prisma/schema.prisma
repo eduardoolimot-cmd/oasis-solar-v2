@@ -1,0 +1,618 @@
+// OASIS SOLAR — schema Prisma (Fase 1: Fundação)
+// Provider atual: sqlite (dev local, sem Postgres/Docker disponíveis nesta máquina).
+// Antes do deploy: trocar provider para "postgresql" e apontar DATABASE_URL para o VPS Hostinger.
+// Enums são modelados como String (validados na aplicação) porque o conector sqlite não suporta
+// enum nativo — mantém o schema portável entre sqlite e postgresql sem alterações estruturais.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+/// Perfis de usuário: "ADMIN" | "USUARIO"
+/// Situação de usina: "IMPLANTACAO" | "OPERACAO" | "DESATIVADA"
+/// Ação de auditoria: "CRIACAO" | "EDICAO" | "CANCELAMENTO" | "DESATIVACAO" | "MOVIMENTACAO" | "ACESSO"
+
+model Usuario {
+  id           String    @id @default(cuid())
+  nome         String
+  email        String    @unique
+  senhaHash    String
+  perfil       String    @default("USUARIO") // ADMIN | USUARIO
+  ativo        Boolean   @default(true)
+  tokenVersion Int       @default(0)
+  ultimoAcesso DateTime?
+  criadoEm     DateTime  @default(now())
+  atualizadoEm DateTime  @updatedAt
+
+  permissoes    Permissao[]
+  logsAuditoria LogAuditoria[]
+
+  @@map("usuarios")
+}
+
+model Usina {
+  id                   String    @id @default(cuid())
+  nome                 String
+  identificadorInterno String    @unique
+  municipio            String?
+  uf                   String?
+  endereco             String?
+  latitude             Float?
+  longitude            Float?
+  fusoHorario          String    @default("America/Sao_Paulo")
+  potenciaDcKwp        Float
+  potenciaAcKw         Float?
+  baseFcPadrao         String    @default("DC") // AC | DC — ver docs/DECISOES_PLACEHOLDER.md
+  inicioOperacao       DateTime?
+  situacao             String    @default("IMPLANTACAO") // IMPLANTACAO | OPERACAO | DESATIVADA
+  observacoes          String?
+  fotoUrl              String?
+
+  // Referência de medição ainda em uso (Plano de irradiação: GHI x POA, ver aba Irradiação).
+  planoIrradiacao String? // GHI | POA
+
+  // Seção "Dados nominais" — quantidades agregadas. Inteiro ausente = desconhecido, nunca
+  // presumido como zero. totalModulos é informado à parte pois pode não bater com a soma dos
+  // grupos de módulos por inversor (ver "Conferência" na especificação).
+  totalModulos                Int?
+  totalCombinerBoxes          Int?
+  totalTrackers               Int?
+  totalDispositivosAuxiliares Int?
+  ultimaSincronizacaoNominais DateTime? // "Buscar do monitoramento" — sem integração ativa nesta fase
+
+  criadoEm     DateTime @default(now())
+  atualizadoEm DateTime @updatedAt
+
+  permissoes              Permissao[]
+  skids                   Skid[]
+  inversores              Inversor[]
+  degradacoes             Degradacao[]
+  previsoesMensais        PrevisaoMensal[]
+  previsoesMensaisSkid    PrevisaoMensalSkid[]
+  previsoesAnuais         PrevisaoAnual[]
+  importacoesMetas        ImportacaoMetas[]
+  lancamentosGeracao      LancamentoGeracaoDiaria[]
+  lancamentosIrradiacao   LancamentoIrradiacaoDiaria[]
+  fechamentosCompetencia  FechamentoCompetencia[]
+  processamentosIndicador ProcessamentoIndicador[]
+  estoqueSaldos           EstoqueUsinaItem[]
+  movimentacoesEstoque    MovimentacaoEstoque[]
+  ordensServico           OrdemServico[]
+  planosPreventivos       PlanoPreventivo[]
+  eventosOperacionais     EventoOperacional[]
+  lancamentosFinanceiros  LancamentoFinanceiro[]
+  relatoriosEmitidos      RelatorioEmitido[]
+
+  @@map("usinas")
+}
+
+/// Lançamento diário de geração de energia bruta (aba "Geração de Energia Bruta" / Lançamento de
+/// Dados). skidId/inversorId nulos = medição no nível da usina (Σ Inversores ou medição própria,
+/// guardadas como referências separadas — nunca somadas). Duplicidade (mesma usina/SKID/inversor/
+/// data) é controlada na aplicação, não por constraint única, porque colunas nulas não bastam para
+/// detectar duplicidade em SQLite/Postgres (NULL é sempre distinto de NULL numa unique key).
+model LancamentoGeracaoDiaria {
+  id           String    @id @default(cuid())
+  usinaId      String
+  usina        Usina     @relation(fields: [usinaId], references: [id], onDelete: Cascade)
+  skidId       String?
+  skid         Skid?     @relation(fields: [skidId], references: [id], onDelete: SetNull)
+  inversorId   String?
+  inversor     Inversor? @relation(fields: [inversorId], references: [id], onDelete: SetNull)
+  data         DateTime
+  energiaKwh   Float
+  origem       String? // ex.: "Inversores", "Medidor de fronteira", "Importação"
+  observacao   String?
+  criadoPorId  String?
+  criadoEm     DateTime  @default(now())
+  atualizadoEm DateTime  @updatedAt
+
+  @@index([usinaId, data])
+  @@index([skidId, data])
+  @@index([inversorId, data])
+  @@map("lancamentos_geracao_diaria")
+}
+
+/// Lançamento diário de irradiação. skidId nulo = irradiação representativa da usina ("geral").
+model LancamentoIrradiacaoDiaria {
+  id              String   @id @default(cuid())
+  usinaId         String
+  usina           Usina    @relation(fields: [usinaId], references: [id], onDelete: Cascade)
+  skidId          String?
+  skid            Skid?    @relation(fields: [skidId], references: [id], onDelete: SetNull)
+  data            DateTime
+  irradiacaoKwhM2 Float
+  plano           String? // GHI | POA
+  origem          String?
+  criadoPorId     String?
+  criadoEm        DateTime @default(now())
+  atualizadoEm    DateTime @updatedAt
+
+  @@index([usinaId, data])
+  @@index([skidId, data])
+  @@map("lancamentos_irradiacao_diaria")
+}
+
+/// Situação da competência (mês) por usina — "parcial" ou "fechado". Fechamento é sempre uma ação
+/// explícita do usuário; o sistema nunca fecha nem reabre automaticamente.
+model FechamentoCompetencia {
+  id              String   @id @default(cuid())
+  usinaId         String
+  usina           Usina    @relation(fields: [usinaId], references: [id], onDelete: Cascade)
+  ano             Int
+  mes             Int
+  situacao        String   @default("PARCIAL") // PARCIAL | FECHADO
+  atualizadoPorId String?
+  atualizadoEm    DateTime @updatedAt
+  criadoEm        DateTime @default(now())
+
+  @@unique([usinaId, ano, mes])
+  @@map("fechamentos_competencia")
+}
+
+/// Cada SKID pertence a uma usina. "Sem histórico" (nenhum inversor jamais vinculado e nenhuma
+/// medição referenciando o SKID) pode ser excluído; caso contrário, apenas desativado — ver
+/// regra de negócio nas rotas.
+model Skid {
+  id               String    @id @default(cuid())
+  usinaId          String
+  usina            Usina     @relation(fields: [usinaId], references: [id], onDelete: Cascade)
+  nome             String
+  uc               String?
+  potenciaFvKwp    Float?
+  transformadorKva Float?
+  fabricante       String?
+  modelo           String?
+  inicioOperacao   DateTime?
+  observacoes      String?
+  ativo            Boolean   @default(true)
+  criadoEm         DateTime  @default(now())
+  atualizadoEm     DateTime  @updatedAt
+
+  inversores            Inversor[]
+  vinculos              VinculoInversorSkid[]
+  lancamentosGeracao    LancamentoGeracaoDiaria[]
+  lancamentosIrradiacao LancamentoIrradiacaoDiaria[]
+  previsoesMensais      PrevisaoMensalSkid[]
+  ordensServico         OrdemServico[]
+  planosPreventivos     PlanoPreventivo[]
+  eventosOperacionais   EventoOperacional[]
+
+  @@unique([usinaId, nome])
+  @@map("skids")
+}
+
+model Inversor {
+  id                String   @id @default(cuid())
+  usinaId           String
+  usina             Usina    @relation(fields: [usinaId], references: [id], onDelete: Cascade)
+  skidId            String? // vínculo vigente; histórico completo em VinculoInversorSkid
+  skid              Skid?    @relation(fields: [skidId], references: [id], onDelete: SetNull)
+  identificacao     String
+  quantidadeModulos Int?
+  kwCa              Float?
+  modelo            String?
+  marca             String?
+  moduloWp          Float?
+  ativo             Boolean  @default(true)
+  criadoEm          DateTime @default(now())
+  atualizadoEm      DateTime @updatedAt
+
+  vinculos           VinculoInversorSkid[]
+  lancamentosGeracao LancamentoGeracaoDiaria[]
+
+  // A identificação do inversor (ex.: "INV1") é dada pelo fabricante/instalação e se repete em
+  // SKIDs diferentes da mesma usina — a unicidade real é por SKID, não pela usina inteira.
+  @@unique([usinaId, skidId, identificacao])
+  @@map("inversores")
+}
+
+/// Histórico de vínculo inversor↔SKID com vigência. "Somatórios diários e relatórios usam o
+/// vínculo vigente na data do dado" (PDF, seção SKIDs e Inversores) — este histórico é a base
+/// para essa reconstrução, mesmo antes do Lançamento de Dados (Fase 3) consumi-lo.
+model VinculoInversorSkid {
+  id             String    @id @default(cuid())
+  inversorId     String
+  inversor       Inversor  @relation(fields: [inversorId], references: [id], onDelete: Cascade)
+  skidId         String?
+  skid           Skid?     @relation(fields: [skidId], references: [id], onDelete: SetNull)
+  inicioVigencia DateTime  @default(now())
+  fimVigencia    DateTime?
+
+  @@index([inversorId])
+  @@map("vinculos_inversor_skid")
+}
+
+/// Degradação esperada — modelo linear por usina/versão (ver docs/DECISOES_PLACEHOLDER.md:
+/// múltiplas curvas por grupo de módulos não suportadas nesta fase). Versões anteriores são
+/// preservadas (ativo=false), nunca sobrescritas.
+model Degradacao {
+  id                     String   @id @default(cuid())
+  usinaId                String
+  usina                  Usina    @relation(fields: [usinaId], references: [id], onDelete: Cascade)
+  perdaPrimeiroAnoPct    Float
+  perdaAnualConstantePct Float
+  dataBase               DateTime
+  documentoOrigem        String?
+  modeloAdotado          String   @default("LINEAR")
+  versao                 Int
+  ativo                  Boolean  @default(true)
+  criadoEm               DateTime @default(now())
+
+  @@unique([usinaId, versao])
+  @@map("degradacoes")
+}
+
+/// Previsões/metas mensais (aba "Metas mensais" — geração P50/P90, irradiação/PR previstos,
+/// disponibilidade meta). FC P50/P90 não é persistido: é sempre derivado em tempo de
+/// leitura a partir da energia prevista, potência e horas do mês (somente leitura, nunca editável
+/// nem armazenado desatualizado). "versao" segue o mesmo esquema de preservação de Degradacao.
+model PrevisaoMensal {
+  id      String  @id @default(cuid())
+  usinaId String
+  usina   Usina   @relation(fields: [usinaId], references: [id], onDelete: Cascade)
+  ano     Int
+  mes     Int // 1-12
+  versao  Int
+  ativo   Boolean @default(true)
+
+  geracaoPrevistaKwh      Float? // referência usada no IPE — não presume ser igual ao P50
+  geracaoP50Kwh           Float?
+  geracaoP90Kwh           Float?
+  irradiacaoPrevistaKwhM2 Float?
+  prPrevistoPct           Float?
+  dispGeracaoMetaPct      Float?
+  dispComunicacaoMetaPct  Float?
+
+  documentoOrigem String?
+  responsavel     String?
+  criadoEm        DateTime @default(now())
+
+  @@unique([usinaId, ano, mes, versao])
+  @@index([usinaId, ano, versao])
+  @@map("previsoes_mensais")
+}
+
+/// Previsão mensal por SKID — Geração Mensal (E_Grid), Irradiação Mensal Efetiva (GlobEff) e PR
+/// Mensal, os mesmos 3 indicadores das tabelas PVsyst empilhadas usadas na importação inicial
+/// (`importar_dados_reais.ts`), agora editáveis em Cadastro de Usinas. Ao salvar uma nova versão
+/// para um SKID, o backend recalcula e grava uma nova versão de PrevisaoMensal (nível da usina)
+/// somando a energia de todos os SKIDs ativos e ponderando irradiação/PR por potência instalada —
+/// nunca média simples (ver docs/DECISOES_PLACEHOLDER.md). "versao" segue o mesmo esquema de
+/// preservação de PrevisaoMensal (nunca sobrescreve, sempre uma nova linha).
+model PrevisaoMensalSkid {
+  id      String  @id @default(cuid())
+  usinaId String
+  usina   Usina   @relation(fields: [usinaId], references: [id], onDelete: Cascade)
+  skidId  String
+  skid    Skid    @relation(fields: [skidId], references: [id], onDelete: Cascade)
+  ano     Int
+  mes     Int // 1-12
+  versao  Int
+  ativo   Boolean @default(true)
+
+  geracaoEGridKwh        Float? // total do SKID no mês, kWh — dividido automaticamente entre os
+  // inversores ativos do SKID para exibição (não persistido por
+  // inversor, ver rota)
+  irradiacaoGlobEffKwhM2 Float?
+  prPct                  Float?
+
+  documentoOrigem String?
+  responsavel     String?
+  criadoEm        DateTime @default(now())
+
+  @@unique([skidId, ano, mes, versao])
+  @@index([usinaId, ano, versao])
+  @@map("previsoes_mensais_skid")
+}
+
+/// Cenários anuais quando o estudo só fornece P50/P90 (ou PR/irradiação) no nível do ano, sem
+/// abertura mensal — os meses correspondentes ficam sem dado em PrevisaoMensal, sem rateio
+/// automático (regra explícita do PDF).
+model PrevisaoAnual {
+  id      String  @id @default(cuid())
+  usinaId String
+  usina   Usina   @relation(fields: [usinaId], references: [id], onDelete: Cascade)
+  ano     Int
+  versao  Int
+  ativo   Boolean @default(true)
+
+  geracaoP50Kwh Float?
+  geracaoP90Kwh Float?
+
+  documentoOrigem String?
+  responsavel     String?
+  criadoEm        DateTime @default(now())
+
+  @@unique([usinaId, ano, versao])
+  @@map("previsoes_anuais")
+}
+
+/// Registro de cada importação de Excel de metas — trilha de auditoria específica exigida pelo
+/// PDF ("Registrar usuário, arquivo, ano, usina, versão anterior e nova").
+model ImportacaoMetas {
+  id             String   @id @default(cuid())
+  usinaId        String
+  usina          Usina    @relation(fields: [usinaId], references: [id], onDelete: Cascade)
+  usuarioId      String?
+  ano            Int
+  nomeArquivo    String
+  versaoAnterior Int?
+  versaoNova     Int
+  criadoEm       DateTime @default(now())
+
+  @@map("importacoes_metas")
+}
+
+// ---------------------------------------------------------------------------------------------
+// Manutenção e Estoque (Fase 6)
+//
+// Granularidade de equipamento: OS, planos preventivos e eventos operacionais referenciam no
+// máximo um SKID (nunca um inversor específico) — mesma simplificação já adotada em PR/FC por
+// SKID nas abas do Dashboard (Fase 4, ver docs/DECISOES_PLACEHOLDER.md). skidId nulo = evento no
+// nível da usina inteira.
+// ---------------------------------------------------------------------------------------------
+
+/// Catálogo de itens de estoque (peças, insumos) — compartilhado entre usinas (mesmo modelo de
+/// inversor, por ex., é comprado para usinas diferentes). O saldo físico e o custo são por usina,
+/// em EstoqueUsinaItem.
+model ItemCatalogo {
+  id            String   @id @default(cuid())
+  nome          String
+  categoria     String?
+  unidadeMedida String   @default("un")
+  estoqueMinimo Float?
+  imagemUrl     String?
+  ativo         Boolean  @default(true)
+  criadoEm      DateTime @default(now())
+
+  saldos        EstoqueUsinaItem[]
+  movimentacoes MovimentacaoEstoque[]
+
+  @@map("itens_catalogo")
+}
+
+/// Saldo físico e custo médio ponderado de um item numa usina. Recalculado a cada ENTRADA
+/// (custoMedioNovo = (saldoAnterior×custoAnterior + qtdEntrada×custoEntrada) / novoSaldo); SAIDA
+/// debita a quantidade pelo custo médio vigente, sem alterá-lo (ver docs/DECISOES_PLACEHOLDER.md
+/// — "Critério de custo/valorização do estoque").
+model EstoqueUsinaItem {
+  id                 String       @id @default(cuid())
+  usinaId            String
+  usina              Usina        @relation(fields: [usinaId], references: [id], onDelete: Cascade)
+  itemId             String
+  item               ItemCatalogo @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  saldoQuantidade    Float        @default(0)
+  custoMedioUnitario Float? // null enquanto nunca houve entrada com custo informado
+  atualizadoEm       DateTime     @updatedAt
+
+  @@unique([usinaId, itemId])
+  @@map("estoque_usina_item")
+}
+
+/// Movimentação de estoque — trilha imutável (nunca editada/apagada; um lançamento incorreto é
+/// corrigido com uma movimentação de estorno, não alterando a original — mesmo princípio do log de
+/// auditoria). ENTRADA soma ao saldo e recalcula o custo médio; SAIDA subtrai e reconhece o custo
+/// de O&M no momento do consumo (não na compra), vinculada opcionalmente a uma Ordem de Serviço;
+/// AJUSTE corrige o saldo físico (contagem de inventário), exige justificativa e permissão própria
+/// (estoque.ajustar, distinta de estoque.movimentar).
+model MovimentacaoEstoque {
+  id             String        @id @default(cuid())
+  usinaId        String
+  usina          Usina         @relation(fields: [usinaId], references: [id], onDelete: Cascade)
+  itemId         String
+  item           ItemCatalogo  @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  tipo           String // ENTRADA | SAIDA | AJUSTE
+  quantidade     Float // sempre positiva; o efeito no saldo depende de "tipo"
+  custoUnitario  Float? // informado em ENTRADA; em SAIDA é preenchido com o custo médio vigente
+  ordemServicoId String?
+  ordemServico   OrdemServico? @relation(fields: [ordemServicoId], references: [id], onDelete: SetNull)
+  motivo         String? // obrigatório em AJUSTE
+  usuarioId      String?
+  criadoEm       DateTime      @default(now())
+
+  @@index([usinaId, itemId])
+  @@map("movimentacoes_estoque")
+}
+
+/// Ordem de Serviço — corretiva ou preventiva. O quadro Kanban é ordenado por "status"; o
+/// calendário, por "dataPrevista". Preventiva pode se originar de um PlanoPreventivo (histórico
+/// preservado mesmo se o plano for desativado depois).
+model OrdemServico {
+  id                String           @id @default(cuid())
+  usinaId           String
+  usina             Usina            @relation(fields: [usinaId], references: [id], onDelete: Cascade)
+  titulo            String
+  descricao         String?
+  tipo              String           @default("CORRETIVA") // CORRETIVA | PREVENTIVA
+  status            String           @default("ABERTA") // ABERTA | EM_ANDAMENTO | CONCLUIDA | CANCELADA
+  prioridade        String           @default("MEDIA") // BAIXA | MEDIA | ALTA
+  skidId            String?
+  skid              Skid?            @relation(fields: [skidId], references: [id], onDelete: SetNull)
+  planoPreventivoId String?
+  planoPreventivo   PlanoPreventivo? @relation(fields: [planoPreventivoId], references: [id], onDelete: SetNull)
+  dataPrevista      DateTime?
+  dataConclusao     DateTime?
+  responsavelId     String?
+  criadoPorId       String?
+  criadoEm          DateTime         @default(now())
+  atualizadoEm      DateTime         @updatedAt
+
+  movimentacoesEstoque   MovimentacaoEstoque[]
+  eventosOperacionais    EventoOperacional[]
+  lancamentosFinanceiros LancamentoFinanceiro[]
+  fotos                  FotoOrdemServico[]
+
+  @@index([usinaId, status])
+  @@map("ordens_servico")
+}
+
+/// Fotos anexadas a uma Ordem de Serviço (antes/depois do reparo, evidência da execução) — mesmo
+/// padrão de upload da foto da usina e da imagem do item de estoque (ver lib/upload.ts), mas em
+/// lista (uma OS pode ter várias). Exclusão é por foto, sem versionamento — não há "correção" de
+/// foto, só remover e reenviar.
+model FotoOrdemServico {
+  id             String       @id @default(cuid())
+  ordemServicoId String
+  ordemServico   OrdemServico @relation(fields: [ordemServicoId], references: [id], onDelete: Cascade)
+  url            String
+  criadoPorId    String?
+  criadoEm       DateTime     @default(now())
+
+  @@index([ordemServicoId])
+  @@map("fotos_ordem_servico")
+}
+
+/// Custo de O&M lançado manualmente (mão de obra, serviço terceirizado, etc.) — complementa o
+/// custo de peças, que é reconhecido automaticamente no consumo de estoque (MovimentacaoEstoque
+/// tipo SAIDA, ver docs/DECISOES_PLACEHOLDER.md). "data" é a data do custo (dia), não um instante —
+/// mesma convenção de LancamentoGeracaoDiaria, evitando o problema de fuso/hora que um campo
+/// DateTime instantâneo teria em filtros de período por dia inteiro.
+model LancamentoFinanceiro {
+  id             String        @id @default(cuid())
+  usinaId        String
+  usina          Usina         @relation(fields: [usinaId], references: [id], onDelete: Cascade)
+  categoria      String // MAO_DE_OBRA | SERVICO_TERCEIRIZADO | PECAS_AVULSAS | OUTROS
+  descricao      String
+  valor          Float
+  data           DateTime
+  ordemServicoId String?
+  ordemServico   OrdemServico? @relation(fields: [ordemServicoId], references: [id], onDelete: SetNull)
+  criadoPorId    String?
+  criadoEm       DateTime      @default(now())
+
+  @@index([usinaId, data])
+  @@map("lancamentos_financeiros")
+}
+
+/// Relatório emitido (Fase 8) — nunca apagado automaticamente, mantido com sua "fotografia" de
+/// dados (dadosSnapshot, JSON) e dos filtros usados na emissão (ver docs/DECISOES_PLACEHOLDER.md,
+/// "Relatórios — identidade e retenção"). O arquivo (PDF/Excel/CSV) é sempre regerado a partir
+/// deste snapshot, nunca recalculado com dados atuais — reabrir/baixar de novo um relatório antigo
+/// deve produzir sempre o mesmo conteúdo, mesmo que lançamentos tenham mudado depois.
+model RelatorioEmitido {
+  id            String   @id @default(cuid())
+  usinaId       String
+  usina         Usina    @relation(fields: [usinaId], references: [id], onDelete: Cascade)
+  tipo          String   @default("DESEMPENHO")
+  formato       String // PDF | XLSX | CSV
+  periodoInicio DateTime
+  periodoFim    DateTime
+  responsavel   String?
+  dadosSnapshot String // JSON serializado
+  criadoPorId   String?
+  criadoEm      DateTime @default(now())
+
+  @@index([usinaId, criadoEm])
+  @@map("relatorios_emitidos")
+}
+
+/// Plano de manutenção preventiva — recorrência simples por intervalo de dias corridos.
+/// "proximaGeracao" é atualizada (proximaGeracao + frequenciaDias) sempre que uma OS é gerada a
+/// partir do plano, nunca retroativamente — atraso na geração não acumula OS perdidas.
+model PlanoPreventivo {
+  id             String   @id @default(cuid())
+  usinaId        String
+  usina          Usina    @relation(fields: [usinaId], references: [id], onDelete: Cascade)
+  titulo         String
+  descricao      String?
+  frequenciaDias Int
+  skidId         String?
+  skid           Skid?    @relation(fields: [skidId], references: [id], onDelete: SetNull)
+  proximaGeracao DateTime
+  ativo          Boolean  @default(true)
+  criadoEm       DateTime @default(now())
+
+  ordensServico OrdemServico[]
+
+  @@map("planos_preventivos")
+}
+
+/// Evento operacional (parada de geração ou de comunicação) — fonte de Disponibilidade, MTTR e
+/// MTBF da aba "Disponibilidade" do Dashboard individual (antes um stub explícito, ver
+/// docs/DECISOES_PLACEHOLDER.md). "escopo" define se o evento entra no cálculo de MTTR/MTBF da
+/// usina inteira ou de um equipamento (SKID) específico — nunca misturados. Evento sem "fim" é uma
+/// parada em andamento (conta como indisponibilidade até agora, nunca presumida encerrada).
+model EventoOperacional {
+  id             String        @id @default(cuid())
+  usinaId        String
+  usina          Usina         @relation(fields: [usinaId], references: [id], onDelete: Cascade)
+  escopo         String // USINA | EQUIPAMENTO
+  skidId         String?
+  skid           Skid?         @relation(fields: [skidId], references: [id], onDelete: SetNull)
+  tipo           String        @default("GERACAO") // GERACAO | COMUNICACAO
+  inicio         DateTime
+  fim            DateTime?
+  motivo         String?
+  ordemServicoId String?
+  ordemServico   OrdemServico? @relation(fields: [ordemServicoId], references: [id], onDelete: SetNull)
+  criadoPorId    String?
+  criadoEm       DateTime      @default(now())
+
+  @@index([usinaId, inicio])
+  @@map("eventos_operacionais")
+}
+
+/// Marca "Último processamento" de cada aba do Dashboard individual (Geração Bruta, Irradiação,
+/// PR, FC, Disponibilidade). Os indicadores em si são sempre calculados em tempo real a partir dos
+/// lançamentos — não há cache de valores para invalidar. "Reprocessar" (idempotente: nunca coleta
+/// dados novos nem duplica registros) apenas recalcula e atualiza este carimbo de data/hora,
+/// preservando o resultado anterior exibido em caso de erro (ver rota).
+model ProcessamentoIndicador {
+  id              String   @id @default(cuid())
+  usinaId         String
+  usina           Usina    @relation(fields: [usinaId], references: [id], onDelete: Cascade)
+  aba             String // geracao_bruta | irradiacao | pr | fc | disponibilidade
+  processadoEm    DateTime @default(now())
+  processadoPorId String?
+
+  @@unique([usinaId, aba])
+  @@map("processamentos_indicador")
+}
+
+/// Permissão = combinação usuário + módulo + ação, opcionalmente restrita a uma usina.
+/// usinaId nulo + incluirFuturas=false  => todas as usinas atuais no momento da concessão (snapshot
+///   resolvido pela ausência de linha por usina; ver regra de negócio no middleware de permissões).
+/// usinaId nulo + incluirFuturas=true   => todas as usinas, inclusive futuras.
+model Permissao {
+  id             String   @id @default(cuid())
+  usuarioId      String
+  usuario        Usuario  @relation(fields: [usuarioId], references: [id], onDelete: Cascade)
+  usinaId        String?
+  usina          Usina?   @relation(fields: [usinaId], references: [id], onDelete: Cascade)
+  incluirFuturas Boolean  @default(false)
+  modulo         String // ex.: "painel", "cadastro_usinas", "lancamentos", "manutencao", ...
+  acao           String // ex.: "visualizar", "criar", "editar", "exportar", ...
+  criadoEm       DateTime @default(now())
+
+  @@unique([usuarioId, usinaId, modulo, acao])
+  @@index([usuarioId])
+  @@map("permissoes")
+}
+
+/// Log de auditoria imutável — nunca editado/apagado pela interface (nem por administrador).
+model LogAuditoria {
+  id            String   @id @default(cuid())
+  usuarioId     String?
+  usuario       Usuario? @relation(fields: [usuarioId], references: [id], onDelete: SetNull)
+  usinaId       String?
+  modulo        String
+  entidade      String
+  entidadeId    String?
+  acao          String // CRIACAO | EDICAO | CANCELAMENTO | DESATIVACAO | MOVIMENTACAO | ACESSO
+  campo         String?
+  valorAnterior String?
+  valorNovo     String?
+  justificativa String?
+  criadoEm      DateTime @default(now())
+
+  @@index([usinaId])
+  @@index([usuarioId])
+  @@index([criadoEm])
+  @@map("logs_auditoria")
+}

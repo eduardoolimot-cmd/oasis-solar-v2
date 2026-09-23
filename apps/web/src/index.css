@@ -1,0 +1,176 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  @apply font-sans text-os-azul-marinho bg-white antialiased;
+}
+
+/* ---------- Aparência dos cartões (layout de dashboard analítico) ---------- */
+/* Os blocos de conteúdo do sistema usam "bg-white border … rounded-lg"; aqui todos ganham o mesmo
+   acabamento sem precisar repetir classes em cada tela. Raio e sombra seguem o design de
+   referência Velzon (docs/design.md, 2026-09-22): cantos discretos (dominante 4px no original;
+   aqui 8px, para não destoar dos botões/inputs já em rounded-md/rounded-lg) e sombra rasa em duas
+   camadas ("flat/enterprise"), no lugar do cartão bem arredondado e com sombra difusa anterior. A
+   paleta de cores institucional OASIS SOLAR foi mantida — não adotamos o índigo/azul da Velzon
+   (ver "Design system — referência Velzon" em docs/DECISOES_PLACEHOLDER.md). */
+.bg-white.border.rounded-lg {
+  /* border-radius não pode vir de "@apply rounded-lg" (dependência circular: rounded-lg já é
+     parte do seletor); o valor é o mesmo de Tailwind rounded-lg (0.5rem/8px), só escrito direto. */
+  @apply shadow-card border-slate-200/80;
+  border-radius: 0.5rem;
+  background-color: rgba(255, 255, 255, 0.9); /* deixa a foto de fundo da usina aparecer de leve */
+}
+
+/* Título de cartão/seção ("text-os-azul-marinho font-medium text-sm", combinação já usada em
+   ~16 telas): peso 600, como o `.card-title` da referência Velzon (antes 500/font-medium). */
+.text-os-azul-marinho.font-medium.text-sm {
+  font-weight: 600;
+}
+
+/* ---------- Gráficos (Recharts) — acabamento Velzon (docs/design.md, 2026-09-22) ---------- */
+/* Tooltip com o mesmo raio/sombra dos cartões. O componente já aplica padding/raio inline por
+   padrão — !important garante que o valor daqui vença o inline (mesma necessidade já tratada
+   abaixo, no bloco de modo escuro, para cor de fundo/borda). */
+.recharts-default-tooltip {
+  border-radius: 8px !important;
+  box-shadow: 0 1px 2px rgba(56, 65, 74, 0.1), 0 1px 3px rgba(56, 65, 74, 0.08) !important;
+  font-family: "Poppins", sans-serif !important;
+}
+
+/* ---------- Fundo com a foto da usina selecionada (FundoUsina) ---------- */
+/* Foto em degradê: opaca no canto superior e esmaecendo até sumir na diagonal, com transparência,
+   sobre a cor de fundo do tema. O véu por cima garante contraste do texto em qualquer foto. */
+.fundo-usina {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  overflow: hidden;
+}
+.fundo-usina__imagem {
+  position: absolute;
+  inset: 0;
+  background-size: cover;
+  background-position: center;
+  opacity: 0.5;
+  -webkit-mask-image: linear-gradient(160deg, #000 0%, rgba(0, 0, 0, 0.55) 45%, transparent 92%);
+  mask-image: linear-gradient(160deg, #000 0%, rgba(0, 0, 0, 0.55) 45%, transparent 92%);
+  animation: fundo-usina-entrada 900ms ease both;
+}
+.fundo-usina__veu {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(135deg, rgba(0, 56, 109, 0.1) 0%, rgba(243, 246, 250, 0) 60%);
+}
+@keyframes fundo-usina-entrada {
+  from { opacity: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .fundo-usina__imagem { animation: none; }
+}
+
+/* ---------- Celular / tablet ---------- */
+@media (max-width: 767px) {
+  /* Tabelas largas rolam na horizontal em vez de estourar a tela. */
+  main table {
+    display: block;
+    max-width: 100%;
+    overflow-x: auto;
+  }
+  main input,
+  main select,
+  main textarea {
+    font-size: 16px; /* evita o zoom automático do iOS ao focar um campo */
+  }
+}
+
+/* ---------- Modo escuro ---------- */
+/* Remapeia as classes claras já usadas nas telas para uma paleta escura da marca (azul-marinho
+   profundo), em vez de duplicar "dark:" em centenas de elementos. */
+.dark {
+  color-scheme: dark;
+  --dk-fundo: #0B1626;
+  --dk-superficie: #12233A;
+  --dk-superficie-2: #182D48;
+  --dk-borda: #243B58;
+  --dk-texto: #E6EEF7;
+  --dk-texto-suave: #9FB2C8;
+}
+
+.dark body {
+  background-color: var(--dk-fundo);
+  color: var(--dk-texto);
+}
+.dark .bg-\[\#F3F6FA\] { background-color: var(--dk-fundo); }
+.dark .bg-white { background-color: var(--dk-superficie); }
+.dark .bg-white.border.rounded-lg { background-color: rgba(18, 35, 58, 0.9); }
+.dark .fundo-usina__imagem { opacity: 0.32; }
+.dark .fundo-usina__veu { background: linear-gradient(135deg, rgba(11, 22, 38, 0.15) 0%, rgba(11, 22, 38, 0.7) 100%); }
+.dark .bg-slate-50 { background-color: var(--dk-superficie-2); }
+.dark .bg-slate-100 { background-color: var(--dk-superficie-2); }
+.dark .bg-slate-200 { background-color: var(--dk-borda); }
+.dark .hover\:bg-slate-100:hover,
+.dark .hover\:bg-slate-200:hover { background-color: var(--dk-superficie-2); }
+.dark .border-slate-100,
+.dark .border-slate-200,
+.dark .border-slate-300,
+.dark .border-slate-200\/80,
+.dark .divide-slate-100 > :not([hidden]) ~ :not([hidden]) { border-color: var(--dk-borda); }
+.dark .text-os-azul-marinho { color: var(--dk-texto); }
+.dark .text-os-cinza { color: var(--dk-texto-suave); }
+.dark .text-slate-700,
+.dark .text-slate-800,
+.dark .text-slate-900 { color: var(--dk-texto); }
+/* Botões/realces que usam o azul-marinho como FUNDO continuam azul-marinho, com texto branco. */
+.dark .bg-os-azul-marinho { background-color: #0F3A6B; }
+.dark .hover\:bg-os-azul-marinho:hover { background-color: #0F3A6B; color: #fff; }
+.dark .border-os-azul-marinho { border-color: #3B6EA8; }
+.dark .bg-os-amarelo\/20 { background-color: rgba(251, 187, 33, 0.16); }
+.dark .bg-os-estado-verde\/10,
+.dark .bg-os-estado-verde\/15 { background-color: rgba(22, 128, 74, 0.25); }
+.dark .bg-os-estado-vermelho\/5,
+.dark .bg-os-estado-vermelho\/15 { background-color: rgba(180, 35, 24, 0.25); }
+.dark .text-os-estado-verde { color: #4ADE80; }
+.dark .text-os-estado-vermelho { color: #F87171; }
+
+.dark input,
+.dark select,
+.dark textarea {
+  background-color: var(--dk-superficie-2);
+  color: var(--dk-texto);
+  border-color: var(--dk-borda);
+}
+.dark input::placeholder,
+.dark textarea::placeholder { color: #6F86A0; }
+.dark input:disabled,
+.dark select:disabled { background-color: var(--dk-superficie); color: var(--dk-texto-suave); }
+
+/* Gráficos (Recharts) */
+.dark .recharts-cartesian-axis-tick-value,
+.dark .recharts-legend-item-text,
+.dark .recharts-label { fill: var(--dk-texto-suave) !important; color: var(--dk-texto-suave) !important; }
+.dark .recharts-cartesian-grid line { stroke: var(--dk-borda); }
+.dark .recharts-default-tooltip {
+  background-color: var(--dk-superficie-2) !important;
+  border-color: var(--dk-borda) !important;
+  color: var(--dk-texto);
+}
+.dark .recharts-tooltip-cursor { fill: rgba(255, 255, 255, 0.05); }
+/* Trilho vazio dos medidores de aderência (rosca) */
+.dark .recharts-pie-sector path[fill="#EEF2F6"],
+.dark .recharts-sector[fill="#EEF2F6"] { fill: var(--dk-borda); }
+/* Barra/linha/anel "realizado" (azul-marinho #00386D): no escuro esse tom quase desaparece contra
+   o fundo dos cartões (#12233A) — validado com o script de contraste do skill de dataviz (1,35:1,
+   abaixo do mínimo de 3:1). Troca para o mesmo azul mais claro já usado para bordas no modo
+   escuro (.dark .border-os-azul-marinho), sem alterar a cor no modo claro. Cobre barra com cantos
+   arredondados (<path>), barra reta (<rect>), linha (stroke) e o anel do medidor de aderência
+   (RadialBar, que é um <path> com o mesmo fill). */
+.dark path[fill="#00386D"],
+.dark rect[fill="#00386D"],
+.dark .recharts-sector[fill="#00386D"] { fill: #3B6EA8; }
+.dark path[stroke="#00386D"] { stroke: #3B6EA8; }
+
+/* Barras de rolagem discretas no escuro */
+.dark ::-webkit-scrollbar-thumb { background: #2C4666; border-radius: 8px; }
+.dark ::-webkit-scrollbar-track { background: transparent; }

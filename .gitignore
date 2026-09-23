@@ -1,0 +1,20 @@
+node_modules/
+dist/
+build/
+.env
+.env.local
+*.log
+.DS_Store
+Thumbs.db
+apps/api/prisma/dev.db
+apps/api/prisma/dev.db-journal
+# qualquer banco SQLite (produção, cópias de backup) — contêm dados reais das usinas
+*.db
+*.db-journal
+*.sqlite
+apps/api/uploads/
+# arquivos locais do Claude Code (o launch.json de desenvolvimento pode ir para o repositório)
+.claude/scheduled_tasks.lock
+.claude/settings.local.json
+.vscode/
+coverage/
