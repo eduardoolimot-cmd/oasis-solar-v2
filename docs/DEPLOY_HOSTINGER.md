@@ -232,6 +232,45 @@ Pronto: acesse `https://painel.seudominio.com.br`.
 
 ---
 
+## Backup pela linha de comando (no servidor)
+
+Gera um arquivo `.tar.gz` com o banco e as fotos — o mesmo conteúdo do "Backup completo" da tela
+Administração. O banco é copiado com o comando `.backup` do SQLite, que tira uma cópia consistente mesmo
+com a API rodando (copiar o `dev.db` direto, com `cp`, pode pegar o arquivo no meio de uma gravação).
+
+```bash
+cd /var/www/oasis-solar/apps/api && D=$(date +%F_%H%M) && mkdir -p /root/backups && sqlite3 prisma/dev.db ".backup /root/backups/banco-$D.db" && tar -czf /root/backups/oasis-backup-$D.tar.gz -C /root/backups banco-$D.db -C /var/www/oasis-solar/apps/api uploads && rm /root/backups/banco-$D.db && ls -lh /root/backups/oasis-backup-$D.tar.gz
+```
+
+Baixar para o seu computador (no PowerShell do Windows; troque o nome pelo que o comando acima mostrou):
+
+```powershell
+scp root@IP-DO-VPS:/root/backups/oasis-backup-2026-09-23_1430.tar.gz "$HOME\Downloads\"
+```
+
+**Backup automático diário** (todo dia às 3h, apagando os com mais de 30 dias): rode `crontab -e` e
+acrescente a linha abaixo (tudo numa linha só; os `%` precisam da barra `\` no cron):
+
+```
+0 3 * * * cd /var/www/oasis-solar/apps/api && D=$(date +\%F_\%H\%M) && mkdir -p /root/backups && sqlite3 prisma/dev.db ".backup /root/backups/banco-$D.db" && tar -czf /root/backups/oasis-backup-$D.tar.gz -C /root/backups banco-$D.db -C /var/www/oasis-solar/apps/api uploads && rm /root/backups/banco-$D.db && find /root/backups -name 'oasis-backup-*.tar.gz' -mtime +30 -delete
+```
+
+Os backups automáticos ficam no próprio servidor — baixe um de vez em quando para fora dele (se o VPS
+tiver um problema, os backups dali vão junto).
+
+**Restaurar** um backup:
+
+```bash
+mkdir -p /tmp/restaura && tar -xzf /root/backups/oasis-backup-XXXX.tar.gz -C /tmp/restaura
+pm2 stop oasis-api
+cp /var/www/oasis-solar/apps/api/prisma/dev.db /root/backups/antes-de-restaurar.db
+cp /tmp/restaura/banco-*.db /var/www/oasis-solar/apps/api/prisma/dev.db
+cp -r /tmp/restaura/uploads/. /var/www/oasis-solar/apps/api/uploads/
+pm2 start oasis-api
+```
+
+---
+
 ## Atualizar o sistema depois (novas versões)
 
 No seu computador: faça commit e `git push`. No servidor:
