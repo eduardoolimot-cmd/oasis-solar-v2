@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { z } from "zod";
 import { registrarAuditoria } from "../../lib/auditoria";
+import { recalcularPrevisaoUsina } from "../../lib/previsaoUsinaSkid";
 import { prisma } from "../../lib/prisma";
 import { autenticar } from "../../middleware/auth";
 import { exigirPermissao } from "../../middleware/permissao";
@@ -8,9 +9,9 @@ import { exigirPermissao } from "../../middleware/permissao";
 // Cadastro de Usina — dados mensais por SKID (Geração Mensal E_Grid, Irradiação Mensal Efetiva
 // GlobEff, PR Mensal), os mesmos 3 indicadores das tabelas PVsyst empilhadas usadas na importação
 // inicial dos dados reais. Ao salvar uma nova versão para um SKID, a rota recalcula e grava uma
-// nova versão de PrevisaoMensal (nível da usina) — soma de energia entre SKIDs, irradiação e PR
-// ponderados por potência instalada, nunca média simples (mesma fórmula de
-// prisma/importar_dados_reais.ts). "Geração Mensal" é digitada como total do SKID; a divisão por
+// nova versão de PrevisaoMensal (nível da usina) — regras em lib/previsaoUsinaSkid.ts (soma de
+// energia entre SKIDs; irradiação e PR ponderados por potência instalada, nunca média simples).
+// "Geração Mensal" é digitada como total do SKID; a divisão por
 // inversor é sempre automática (soma igual entre os inversores ativos do SKID) e calculada em
 // tempo de leitura — não persistida por inversor, pois não há grandeza própria de inversor na fonte
 // PVsyst (ver docs/DECISOES_PLACEHOLDER.md).
@@ -96,88 +97,6 @@ const salvarSchema = z.object({
   responsavel: z.string().optional(),
 });
 
-/// Recalcula e grava uma nova versão de PrevisaoMensal (nível da usina) a partir das versões
-/// ativas de PrevisaoMensalSkid de TODOS os SKIDs — mesma fórmula ponderada por potência usada na
-/// importação inicial. SKIDs sem dado no mês, ou sem potência cadastrada, são excluídos da soma
-/// (nunca presumidos como zero). Preserva os demais campos (P50/P90/GHI/POA/disponibilidade,
-/// alimentados pela seção "Metas mensais") copiando-os da versão anteriormente ativa.
-async function recalcularPrevisaoUsina(usinaId: string, ano: number, usuarioId: string) {
-  const skids = await prisma.skid.findMany({ where: { usinaId, ativo: true }, select: { id: true, potenciaFvKwp: true } });
-  const linhasPorSkid = await prisma.previsaoMensalSkid.findMany({ where: { usinaId, ano, ativo: true } });
-
-  const versaoAnteriorLinhas = await prisma.previsaoMensal.findMany({ where: { usinaId, ano, ativo: true } });
-  const versaoAnterior = versaoAnteriorLinhas[0]?.versao ?? 0;
-  const novaVersao = versaoAnterior + 1;
-
-  const dadosMensais = Array.from({ length: 12 }, (_, i) => {
-    const mes = i + 1;
-    const anteriorMes = versaoAnteriorLinhas.find((l) => l.mes === mes);
-
-    const porSkid = skids
-      .map((skid) => ({
-        potenciaKwp: skid.potenciaFvKwp,
-        linha: linhasPorSkid.find((l) => l.skidId === skid.id && l.mes === mes),
-      }))
-      .filter((x): x is { potenciaKwp: number; linha: (typeof linhasPorSkid)[number] } => x.potenciaKwp !== null && x.potenciaKwp > 0 && x.linha?.geracaoEGridKwh !== undefined && x.linha?.geracaoEGridKwh !== null);
-
-    // Só recalcula o agregado da usina para este mês quando TODOS os SKIDs ativos (com potência
-    // cadastrada) têm dado nele — um mês/SKID ainda não preenchido nesta seção não pode apagar o
-    // valor já existente (vindo da importação inicial ou de "Metas mensais"): "dado ausente ≠
-    // zero" vale também para a cobertura entre SKIDs, não só entre meses.
-    const skidsComPotencia = skids.filter((s) => s.potenciaFvKwp !== null && s.potenciaFvKwp > 0);
-    const coberturaCompleta = skidsComPotencia.length > 0 && porSkid.length === skidsComPotencia.length;
-
-    const geracaoTotalKwh = coberturaCompleta ? porSkid.reduce((s, x) => s + x.linha.geracaoEGridKwh!, 0) : null;
-    const potenciaTotal = porSkid.reduce((s, x) => s + x.potenciaKwp, 0);
-    const irradiacaoPonderada =
-      coberturaCompleta && potenciaTotal > 0 && porSkid.every((x) => x.linha.irradiacaoGlobEffKwhM2 !== null)
-        ? porSkid.reduce((s, x) => s + (x.linha.irradiacaoGlobEffKwhM2 ?? 0) * x.potenciaKwp, 0) / potenciaTotal
-        : null;
-    // PR previsto = PR Mensal (PVsyst) de cada SKID, ponderado por potência — mesmo critério da
-    // irradiação (nunca média simples). Antes era derivado de energia/energia teórica, o que
-    // divergia do PR realmente informado em "Dados mensais por SKID".
-    const prPrevistoPct =
-      coberturaCompleta && potenciaTotal > 0 && porSkid.every((x) => x.linha.prPct !== null)
-        ? porSkid.reduce((s, x) => s + (x.linha.prPct ?? 0) * x.potenciaKwp, 0) / potenciaTotal
-        : null;
-
-    return {
-      usinaId,
-      ano,
-      mes,
-      versao: novaVersao,
-      // Cobertura incompleta entre SKIDs para este mês: preserva o valor anterior (importado ou de
-      // uma versão prévia) em vez de apagá-lo.
-      geracaoPrevistaKwh: coberturaCompleta ? geracaoTotalKwh : anteriorMes?.geracaoPrevistaKwh ?? null,
-      irradiacaoPrevistaKwhM2: coberturaCompleta ? irradiacaoPonderada : anteriorMes?.irradiacaoPrevistaKwhM2 ?? null,
-      prPrevistoPct: coberturaCompleta ? prPrevistoPct : anteriorMes?.prPrevistoPct ?? null,
-      // Campos alimentados por "Metas mensais" (não tocados por esta rota) — preservados da
-      // versão anterior para nunca perder dado ao salvar uma previsão por SKID.
-      geracaoP50Kwh: anteriorMes?.geracaoP50Kwh ?? null,
-      geracaoP90Kwh: anteriorMes?.geracaoP90Kwh ?? null,
-      dispGeracaoMetaPct: anteriorMes?.dispGeracaoMetaPct ?? null,
-      dispComunicacaoMetaPct: anteriorMes?.dispComunicacaoMetaPct ?? null,
-      documentoOrigem: "Cadastro de Usinas — dados mensais por SKID",
-      responsavel: null,
-    };
-  });
-
-  await prisma.previsaoMensal.updateMany({ where: { usinaId, ano, ativo: true }, data: { ativo: false } });
-  await prisma.previsaoMensal.createMany({ data: dadosMensais });
-
-  await registrarAuditoria({
-    usuarioId,
-    usinaId,
-    modulo: "cadastro_usinas",
-    entidade: "PrevisaoMensal",
-    entidadeId: usinaId,
-    acao: "EDICAO",
-    justificativa: `Recalculada a partir da previsão mensal por SKID — nova versão ${novaVersao} (ano ${ano})`,
-    valorAnterior: versaoAnterior || null,
-    valorNovo: novaVersao,
-  });
-}
-
 router.put("/:usinaId/skids/:skidId/previsoes-skid", exigirPermissao("cadastro_usinas", "editar"), async (req, res) => {
   const ano = anoDaQuery(req);
   const parsed = salvarSchema.safeParse(req.body);
@@ -226,7 +145,7 @@ router.put("/:usinaId/skids/:skidId/previsoes-skid", exigirPermissao("cadastro_u
     valorNovo: novaVersao,
   });
 
-  await recalcularPrevisaoUsina(req.params.usinaId, ano, req.usuario!.id);
+  await recalcularPrevisaoUsina(req.params.usinaId, ano, req.usuario!.id, "Recalculada a partir da previsão mensal por SKID");
 
   const skidComInversores = await prisma.skid.findUniqueOrThrow({
     where: { id: skid.id },
