@@ -365,6 +365,10 @@ model ItemCatalogo {
   id            String   @id @default(cuid())
   nome          String
   categoria     String?
+  /// Número da etiqueta de identificação do material — obrigatório no cadastro de novos itens pela
+  /// interface (itens antigos podem não ter). Unicidade conferida na API (sem @unique no banco para
+  /// o "prisma db push" em produção não pedir --accept-data-loss).
+  numeroEtiqueta String?
   unidadeMedida String   @default("un")
   estoqueMinimo Float?
   imagemUrl     String?

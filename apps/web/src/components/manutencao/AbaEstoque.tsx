@@ -1,12 +1,16 @@
 import { useEffect, useRef, useState } from "react";
+import { AlertTriangle } from "lucide-react";
 import { api } from "../../api/client";
 import { useAuth } from "../../context/AuthContext";
 import { FotoAutenticada } from "../FotoAutenticada";
+import { DetalheItemEstoque } from "./DetalheItemEstoque";
+import { NovoMaterial } from "./NovoMaterial";
 
 interface SaldoItem {
   itemId: string;
   nome: string;
   categoria: string | null;
+  numeroEtiqueta: string | null;
   unidadeMedida: string;
   estoqueMinimo: number | null;
   imagemUrl: string | null;
@@ -41,9 +45,7 @@ export function AbaEstoque({ usinaId }: Props) {
   const [erro, setErro] = useState<string | null>(null);
 
   const [mostrarNovoItem, setMostrarNovoItem] = useState(false);
-  const [nomeItem, setNomeItem] = useState("");
-  const [categoriaItem, setCategoriaItem] = useState("");
-  const [unidadeItem, setUnidadeItem] = useState("un");
+  const [itemDetalhe, setItemDetalhe] = useState<SaldoItem | null>(null);
 
   const [mostrarMovimentacao, setMostrarMovimentacao] = useState<"ENTRADA" | "SAIDA" | "AJUSTE" | null>(null);
   const [itemSelecionado, setItemSelecionado] = useState("");
@@ -57,6 +59,7 @@ export function AbaEstoque({ usinaId }: Props) {
   const [itemEditando, setItemEditando] = useState<SaldoItem | null>(null);
   const [editNome, setEditNome] = useState("");
   const [editCategoria, setEditCategoria] = useState("");
+  const [editEtiqueta, setEditEtiqueta] = useState("");
   const [editUnidade, setEditUnidade] = useState("");
   const [editMinimo, setEditMinimo] = useState("");
 
@@ -64,6 +67,7 @@ export function AbaEstoque({ usinaId }: Props) {
     setItemEditando(s);
     setEditNome(s.nome);
     setEditCategoria(s.categoria ?? "");
+    setEditEtiqueta(s.numeroEtiqueta ?? "");
     setEditUnidade(s.unidadeMedida);
     setEditMinimo(s.estoqueMinimo !== null ? String(s.estoqueMinimo) : "");
   }
@@ -74,6 +78,7 @@ export function AbaEstoque({ usinaId }: Props) {
       await api.put(`/estoque/catalogo/${itemEditando.itemId}`, {
         nome: editNome.trim(),
         categoria: editCategoria.trim() || undefined,
+        numeroEtiqueta: editEtiqueta.trim() || null,
         unidadeMedida: editUnidade.trim() || "un",
         estoqueMinimo: editMinimo === "" ? null : Number(editMinimo),
       });
@@ -106,21 +111,21 @@ export function AbaEstoque({ usinaId }: Props) {
 
   function carregar() {
     setErro(null);
-    api.get(`/estoque/${usinaId}`).then(({ data }) => setSaldos(data)).catch(() => setErro("Não foi possível carregar o estoque."));
+    api
+      .get<SaldoItem[]>(`/estoque/${usinaId}`)
+      .then(({ data }) => {
+        setSaldos(data);
+        // Mantém a ficha aberta com o saldo atualizado depois de uma movimentação.
+        setItemDetalhe((atual) => (atual ? data.find((s) => s.itemId === atual.itemId) ?? null : null));
+      })
+      .catch(() => setErro("Não foi possível carregar o estoque."));
     api.get(`/estoque/${usinaId}/movimentacoes`).then(({ data }) => setMovimentacoes(data));
   }
 
   useEffect(carregar, [usinaId]);
 
-  async function criarItem() {
-    if (!nomeItem.trim()) return;
-    await api.post("/estoque/catalogo", { nome: nomeItem.trim(), categoria: categoriaItem || undefined, unidadeMedida: unidadeItem || "un" });
-    setNomeItem("");
-    setCategoriaItem("");
-    setUnidadeItem("un");
-    setMostrarNovoItem(false);
-    carregar();
-  }
+  const categorias = [...new Set((saldos ?? []).map((s) => s.categoria?.trim()).filter((c): c is string => !!c))].sort((a, b) => a.localeCompare(b, "pt-BR"));
+  const unidades = [...new Set((saldos ?? []).map((s) => s.unidadeMedida))];
 
   function abrirMovimentacao(tipo: "ENTRADA" | "SAIDA" | "AJUSTE", itemId?: string) {
     setMostrarMovimentacao(tipo);
@@ -184,29 +189,33 @@ export function AbaEstoque({ usinaId }: Props) {
       {erro && <p className="text-os-estado-vermelho text-sm mb-3">{erro}</p>}
 
       <div className="flex justify-end mb-3">
-        <button onClick={() => setMostrarNovoItem((v) => !v)} className="bg-os-azul-marinho text-white rounded-md px-4 py-2 text-sm">
-          {mostrarNovoItem ? "Cancelar" : "+ Novo item no catálogo"}
-        </button>
+        {temPermissao("estoque", "criar", usinaId) && temPermissao("estoque", "movimentar", usinaId) && (
+          <button onClick={() => setMostrarNovoItem(true)} className="bg-os-azul-marinho text-white rounded-md px-4 py-2 text-sm">
+            + Novo material
+          </button>
+        )}
       </div>
 
       {mostrarNovoItem && (
-        <div className="bg-white border border-slate-200 rounded-lg p-4 mb-4 grid grid-cols-1 sm:grid-cols-3 gap-3">
-          <div>
-            <label className="block text-xs text-os-azul-marinho mb-1">Nome</label>
-            <input value={nomeItem} onChange={(e) => setNomeItem(e.target.value)} className="w-full border border-slate-300 rounded-md px-2 py-1.5 text-sm" />
-          </div>
-          <div>
-            <label className="block text-xs text-os-azul-marinho mb-1">Categoria</label>
-            <input value={categoriaItem} onChange={(e) => setCategoriaItem(e.target.value)} className="w-full border border-slate-300 rounded-md px-2 py-1.5 text-sm" />
-          </div>
-          <div>
-            <label className="block text-xs text-os-azul-marinho mb-1">Unidade</label>
-            <input value={unidadeItem} onChange={(e) => setUnidadeItem(e.target.value)} className="w-full border border-slate-300 rounded-md px-2 py-1.5 text-sm" />
-          </div>
-          <div className="sm:col-span-3">
-            <button onClick={criarItem} className="bg-os-laranja text-white rounded-md px-4 py-2 text-sm">Adicionar ao catálogo</button>
-          </div>
-        </div>
+        <NovoMaterial
+          usinaId={usinaId}
+          categorias={categorias}
+          unidades={unidades}
+          onFechar={() => setMostrarNovoItem(false)}
+          onCriado={() => {
+            setMostrarNovoItem(false);
+            carregar();
+          }}
+        />
+      )}
+
+      {itemDetalhe && !mostrarMovimentacao && (
+        <DetalheItemEstoque
+          usinaId={usinaId}
+          item={itemDetalhe}
+          onFechar={() => setItemDetalhe(null)}
+          onMovimentar={(tipo) => abrirMovimentacao(tipo, itemDetalhe.itemId)}
+        />
       )}
 
       {itemEditando && (
@@ -218,9 +227,25 @@ export function AbaEstoque({ usinaId }: Props) {
                 <label className="block text-xs text-os-azul-marinho mb-1">Nome</label>
                 <input value={editNome} onChange={(e) => setEditNome(e.target.value)} className="w-full border border-slate-300 rounded-md px-2 py-1.5 text-sm" />
               </div>
-              <div>
-                <label className="block text-xs text-os-azul-marinho mb-1">Categoria</label>
-                <input value={editCategoria} onChange={(e) => setEditCategoria(e.target.value)} className="w-full border border-slate-300 rounded-md px-2 py-1.5 text-sm" />
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs text-os-azul-marinho mb-1">Categoria</label>
+                  <input
+                    list="categorias-estoque-edicao"
+                    value={editCategoria}
+                    onChange={(e) => setEditCategoria(e.target.value)}
+                    className="w-full border border-slate-300 rounded-md px-2 py-1.5 text-sm"
+                  />
+                  <datalist id="categorias-estoque-edicao">
+                    {categorias.map((c) => (
+                      <option key={c} value={c} />
+                    ))}
+                  </datalist>
+                </div>
+                <div>
+                  <label className="block text-xs text-os-azul-marinho mb-1">Número da etiqueta</label>
+                  <input value={editEtiqueta} onChange={(e) => setEditEtiqueta(e.target.value)} className="w-full border border-slate-300 rounded-md px-2 py-1.5 text-sm" />
+                </div>
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <div>
@@ -300,6 +325,7 @@ export function AbaEstoque({ usinaId }: Props) {
             <tr>
               <th className="text-left px-4 py-2 font-medium">Imagem</th>
               <th className="text-left px-4 py-2 font-medium">Item</th>
+              <th className="text-left px-4 py-2 font-medium">Etiqueta</th>
               <th className="text-left px-4 py-2 font-medium">Categoria</th>
               <th className="text-right px-4 py-2 font-medium">Saldo</th>
               <th className="text-right px-4 py-2 font-medium">Custo médio</th>
@@ -308,9 +334,14 @@ export function AbaEstoque({ usinaId }: Props) {
           </thead>
           <tbody>
             {saldos.map((s, i) => (
-              <tr key={s.itemId} className={i % 2 === 1 ? "bg-slate-50" : ""}>
+              <tr
+                key={s.itemId}
+                onClick={() => setItemDetalhe(s)}
+                title="Ver item"
+                className={`cursor-pointer hover:bg-os-azul-claro/10 ${i % 2 === 1 ? "bg-slate-50" : ""}`}
+              >
                 <td className="px-4 py-2">
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
                     <FotoAutenticada caminho={s.imagemUrl} alt={s.nome} className="w-10 h-10 object-cover rounded border border-slate-200" />
                     <div className="flex flex-col">
                       <button
@@ -329,14 +360,17 @@ export function AbaEstoque({ usinaId }: Props) {
                     </div>
                   </div>
                 </td>
-                <td className="px-4 py-2">{s.nome}</td>
+                <td className="px-4 py-2 font-medium text-os-azul-marinho">{s.nome}</td>
+                <td className="px-4 py-2 text-os-cinza">{s.numeroEtiqueta ?? "—"}</td>
                 <td className="px-4 py-2 text-os-cinza">{s.categoria ?? "—"}</td>
                 <td className={`px-4 py-2 text-right ${s.abaixoDoMinimo ? "text-os-estado-vermelho font-medium" : ""}`}>
-                  {fmt(s.saldoQuantidade)} {s.unidadeMedida}
-                  {s.abaixoDoMinimo && " ⚠"}
+                  <span className="inline-flex items-center gap-1">
+                    {fmt(s.saldoQuantidade)} {s.unidadeMedida}
+                    {s.abaixoDoMinimo && <AlertTriangle size={14} aria-label="Abaixo do estoque mínimo" />}
+                  </span>
                 </td>
                 <td className="px-4 py-2 text-right">{s.custoMedioUnitario !== null ? `R$ ${fmt(s.custoMedioUnitario)}` : "Sem custo apurado"}</td>
-                <td className="px-4 py-2 text-right whitespace-nowrap">
+                <td className="px-4 py-2 text-right whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
                   <button onClick={() => abrirMovimentacao("ENTRADA", s.itemId)} className="text-os-estado-verde underline text-xs mr-2">Entrada</button>
                   <button onClick={() => abrirMovimentacao("SAIDA", s.itemId)} className="text-os-laranja underline text-xs mr-2">Saída</button>
                   <button onClick={() => abrirMovimentacao("AJUSTE", s.itemId)} className="text-os-cinza underline text-xs mr-2">Ajustar</button>
@@ -351,7 +385,7 @@ export function AbaEstoque({ usinaId }: Props) {
             ))}
             {saldos.length === 0 && (
               <tr>
-                <td colSpan={6} className="px-4 py-6 text-center text-os-cinza text-sm">Nenhum item no catálogo ainda.</td>
+                <td colSpan={7} className="px-4 py-6 text-center text-os-cinza text-sm">Nenhum item no catálogo ainda.</td>
               </tr>
             )}
           </tbody>

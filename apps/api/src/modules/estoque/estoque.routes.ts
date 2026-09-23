@@ -29,13 +29,26 @@ router.get("/catalogo", exigirPermissao("estoque", "visualizar"), async (req, re
 const criarItemSchema = z.object({
   nome: z.string().min(1),
   categoria: z.string().optional(),
+  numeroEtiqueta: z.string().trim().min(1).nullable().optional(),
   unidadeMedida: z.string().min(1).default("un"),
   estoqueMinimo: z.number().nonnegative().nullable().optional(),
 });
 
+/// Número da etiqueta já usado por outro item (a unicidade é conferida aqui, não no banco).
+async function etiquetaEmUso(numeroEtiqueta: string | null | undefined, ignorarItemId?: string) {
+  if (!numeroEtiqueta) return null;
+  return prisma.itemCatalogo.findFirst({
+    where: { numeroEtiqueta, ...(ignorarItemId ? { id: { not: ignorarItemId } } : {}) },
+    select: { nome: true },
+  });
+}
+
 router.post("/catalogo", exigirPermissao("estoque", "criar"), async (req, res) => {
   const parsed = criarItemSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ erro: parsed.error.issues[0]?.message });
+
+  const repetida = await etiquetaEmUso(parsed.data.numeroEtiqueta);
+  if (repetida) return res.status(409).json({ erro: `A etiqueta ${parsed.data.numeroEtiqueta} já está no item "${repetida.nome}".` });
 
   const item = await prisma.itemCatalogo.create({ data: parsed.data });
 
@@ -59,6 +72,9 @@ router.put("/catalogo/:itemId", exigirPermissao("estoque", "editar"), async (req
 
   const anterior = await prisma.itemCatalogo.findUnique({ where: { id: req.params.itemId } });
   if (!anterior) return res.status(404).json({ erro: "Item não encontrado." });
+
+  const repetida = await etiquetaEmUso(parsed.data.numeroEtiqueta, anterior.id);
+  if (repetida) return res.status(409).json({ erro: `A etiqueta ${parsed.data.numeroEtiqueta} já está no item "${repetida.nome}".` });
 
   const item = await prisma.itemCatalogo.update({ where: { id: anterior.id }, data: parsed.data });
 
@@ -166,6 +182,106 @@ router.delete("/catalogo/:itemId/imagem", exigirPermissao("estoque", "editar"), 
   res.status(204).end();
 });
 
+// ---- Novo material na usina (cadastro completo) ----
+
+// Cria o item no catálogo com todos os dados obrigatórios (nome, categoria, nº da etiqueta,
+// unidade, quantidade e foto) e registra a quantidade inicial como ENTRADA nesta usina — tudo numa
+// requisição só, para não sobrar item sem foto ou sem saldo se algo falhar no meio. O custo
+// unitário é opcional: sem ele, a entrada fica sem custo e o custo médio "Sem custo apurado"
+// (nunca presumido).
+const novoMaterialSchema = z.object({
+  nome: z.string().trim().min(1, "Informe o nome."),
+  categoria: z.string().trim().min(1, "Informe a categoria."),
+  numeroEtiqueta: z.string().trim().min(1, "Informe o número da etiqueta."),
+  unidadeMedida: z.string().trim().min(1, "Informe a unidade."),
+  quantidade: z
+    .string()
+    .trim()
+    .min(1, "Informe a quantidade.")
+    .transform(Number)
+    .refine((n) => Number.isFinite(n) && n >= 0, "Quantidade inválida."),
+  custoUnitario: z
+    .string()
+    .trim()
+    .optional()
+    .transform((v) => (v ? Number(v) : null))
+    .refine((n) => n === null || (Number.isFinite(n) && n >= 0), "Custo unitário inválido."),
+});
+
+router.post(
+  "/:usinaId/itens",
+  exigirPermissao("estoque", "criar"),
+  exigirPermissao("estoque", "movimentar"),
+  (req, res, next) =>
+    uploadFoto.single("imagem")(req, res, (err: unknown) => {
+      if (!err) return next();
+      const limite = (err as { code?: string }).code === "LIMIT_FILE_SIZE";
+      res.status(400).json({ erro: limite ? "Foto maior que 10 MB." : (err as Error).message || "Falha no envio da foto." });
+    }),
+  async (req, res) => {
+    const descartarFoto = () => req.file && fs.rm(req.file.path, { force: true }, () => {});
+    if (!req.file) return res.status(400).json({ erro: "Adicione a foto do material." });
+
+    const parsed = novoMaterialSchema.safeParse(req.body);
+    if (!parsed.success) {
+      descartarFoto();
+      return res.status(400).json({ erro: parsed.error.issues[0]?.message });
+    }
+    if (!assinaturaValida(fs.readFileSync(req.file.path), req.file.mimetype)) {
+      descartarFoto();
+      return res.status(400).json({ erro: "Arquivo não corresponde a uma imagem JPG, PNG ou WebP válida." });
+    }
+    const { nome, categoria, numeroEtiqueta, unidadeMedida, quantidade, custoUnitario } = parsed.data;
+
+    const repetida = await etiquetaEmUso(numeroEtiqueta);
+    if (repetida) {
+      descartarFoto();
+      return res.status(409).json({ erro: `A etiqueta ${numeroEtiqueta} já está no item "${repetida.nome}".` });
+    }
+    const usina = await prisma.usina.findUnique({ where: { id: req.params.usinaId }, select: { id: true } });
+    if (!usina) {
+      descartarFoto();
+      return res.status(404).json({ erro: "Usina não encontrada." });
+    }
+
+    const imagemUrl = `/uploads/${req.file.filename}`;
+    const { item, movimentacao } = await prisma.$transaction(async (tx) => {
+      const item = await tx.itemCatalogo.create({ data: { nome, categoria, numeroEtiqueta, unidadeMedida, imagemUrl } });
+      if (quantidade === 0) return { item, movimentacao: null };
+      await tx.estoqueUsinaItem.create({
+        data: { usinaId: usina.id, itemId: item.id, saldoQuantidade: quantidade, custoMedioUnitario: custoUnitario },
+      });
+      const movimentacao = await tx.movimentacaoEstoque.create({
+        data: { usinaId: usina.id, itemId: item.id, tipo: "ENTRADA", quantidade, custoUnitario, motivo: "Quantidade inicial no cadastro do item", usuarioId: req.usuario!.id },
+      });
+      return { item, movimentacao };
+    });
+
+    await registrarAuditoria({
+      usuarioId: req.usuario!.id,
+      usinaId: usina.id,
+      modulo: "estoque",
+      entidade: "ItemCatalogo",
+      entidadeId: item.id,
+      acao: "CRIACAO",
+      valorNovo: { nome, categoria, numeroEtiqueta, unidadeMedida, imagemUrl },
+    });
+    if (movimentacao) {
+      await registrarAuditoria({
+        usuarioId: req.usuario!.id,
+        usinaId: usina.id,
+        modulo: "estoque",
+        entidade: "MovimentacaoEstoque",
+        entidadeId: movimentacao.id,
+        acao: "MOVIMENTACAO",
+        valorNovo: { itemId: item.id, tipo: "ENTRADA", quantidade, custoUnitario },
+      });
+    }
+
+    res.status(201).json(item);
+  }
+);
+
 // ---- Saldo e movimentações (por usina) ----
 
 router.get("/:usinaId", exigirPermissao("estoque", "visualizar"), async (req, res) => {
@@ -179,6 +295,7 @@ router.get("/:usinaId", exigirPermissao("estoque", "visualizar"), async (req, re
       itemId: item.id,
       nome: item.nome,
       categoria: item.categoria,
+      numeroEtiqueta: item.numeroEtiqueta,
       unidadeMedida: item.unidadeMedida,
       estoqueMinimo: item.estoqueMinimo,
       imagemUrl: item.imagemUrl,
@@ -195,7 +312,8 @@ router.get("/:usinaId/movimentacoes", exigirPermissao("estoque", "visualizar"), 
     where: { usinaId: req.params.usinaId, ...(req.query.itemId ? { itemId: String(req.query.itemId) } : {}) },
     include: { item: { select: { id: true, nome: true, unidadeMedida: true } }, ordemServico: { select: { id: true, titulo: true } } },
     orderBy: { criadoEm: "desc" },
-    take: 200,
+    // Histórico de um item (ficha do item) vem completo; a lista geral da usina, só as últimas 200.
+    take: req.query.itemId ? undefined : 200,
   });
   res.json(movimentacoes);
 });
