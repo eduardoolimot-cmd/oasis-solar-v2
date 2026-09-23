@@ -129,6 +129,12 @@ O banco e as fotos são enviados direto para o servidor na Parte 4.
 O banco com todos os dados está em `apps\api\prisma\dev.db` no seu computador, e as fotos em
 `apps\api\uploads\`.
 
+> **Jeito mais simples (a partir da versão 0.2.0):** suba o servidor com um banco novo (comando no fim
+> desta parte), entre como administrador e, em **Administração > Restaurar backup**, envie o `.zip` gerado
+> no seu computador (botão "Gerar e baixar backup" ou `npm run backup` na pasta `apps/api`). O banco e as
+> fotos são trocados de uma vez. Exige a configuração do nginx da Parte 6 (limite de envio maior para
+> essa rota). O caminho por `scp`, abaixo, continua valendo.
+
 1. **Pare a API local** antes de copiar (para o arquivo do banco não estar em uso).
 2. No PowerShell do **seu computador**, dentro da pasta do projeto:
 
@@ -180,6 +186,18 @@ server {
 
     # Uploads de fotos/imagens até 10 MB (limite da própria aplicação)
     client_max_body_size 12m;
+
+    # Restaurar backup (tela Administração): o .zip do backup pode ter centenas de MB
+    location = /api/admin/restauracao {
+        client_max_body_size 510m;
+        proxy_pass http://127.0.0.1:3333;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 600s;
+    }
 
     # API
     location /api/ {
@@ -258,7 +276,15 @@ acrescente a linha abaixo (tudo numa linha só; os `%` precisam da barra `\` no 
 Os backups automáticos ficam no próprio servidor — baixe um de vez em quando para fora dele (se o VPS
 tiver um problema, os backups dali vão junto).
 
-**Restaurar** um backup:
+**Mesmo .zip da tela Administração, pela linha de comando** (pode ser enviado em "Restaurar backup"):
+
+```bash
+cd /var/www/oasis-solar/apps/api && npm run backup -- /root/backups
+```
+
+**Restaurar** um backup: pela tela **Administração > Restaurar backup** (envie o `.zip` do botão ou do
+`npm run backup`; o sistema salva antes o estado atual em `apps/api/backups/` e lista esses arquivos na
+tela). Para o `.tar.gz` do comando `sqlite3` acima, pela linha de comando:
 
 ```bash
 mkdir -p /tmp/restaura && tar -xzf /root/backups/oasis-backup-XXXX.tar.gz -C /tmp/restaura

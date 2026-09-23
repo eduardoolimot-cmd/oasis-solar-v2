@@ -621,3 +621,14 @@ desenvolvimento, e revisado com o cliente antes de qualquer declaração de conf
 - Correções confirmadas pelo cliente: as OS "INSPEÇÃO CASQUILHOS QUEBRADOS" (04/09) e "INSPEÇÃO CORRETIVA - TRACKERS BRAMETAL" (19/08), marcadas como Cerado Pedra I no arquivo, foram gravadas em **UFV Pedro Canário** (texto e local indicam Pedro Canário); o chamado "Ticket: 273627 - SG250HX" teve a data "0026-05-17" gravada como 17/05/2026.
 - Gravado como veio, para o cliente revisar: "MANUTENÇÃO PREVENTIVA - GERAL" da Cerado Pedra III (07/08) está "Planejada" (ABERTA) no arquivo, mas a descrição diz "ATIVIDADES REALIZADAS"; "INV4 - PROBLEMA INTERNO" (Sítio do Pescoço, 25/08) cita "No dia 25/05" no texto.
 - Não gerado: eventos de indisponibilidade a partir dos horários citados nos textos (ex.: "SKID1 desligado das 7:50 às 15:35") — exigiria interpretar texto livre; a aba Disponibilidade continua dependendo dos eventos lançados.
+
+## Administração — Restaurar backup pela interface; versão 0.2.0 (2026-09-23)
+
+- Nova seção "Restaurar backup" na tela Administração (só ADMIN). Aceita o .zip do "Gerar e baixar backup" (troca banco **e** pasta de fotos) ou só um arquivo de banco .db (troca só o banco; fotos mantidas). Limite de 500 MB. Exige digitar RESTAURAR. Objetivo principal: levar os dados do computador local para o servidor sem scp.
+- Validações antes de tocar em qualquer coisa: arquivo é .zip com banco.db ou SQLite válido; `PRAGMA integrity_check` = ok; toda tabela e coluna do sistema atual existe no banco enviado (backup de versão mais antiga é recusado, listando o que falta); há ao menos um administrador ativo. Caminhos dentro do .zip são confinados à pasta uploads.
+- Backup de segurança automático: antes da troca, o estado atual é salvo em `apps/api/backups/antes_da_restauracao_<data>.zip` (mesmo formato do backup, portanto restaurável pela mesma tela para desfazer). A tela lista esses arquivos com botão Baixar. Pasta fora do git.
+- Troca do banco com o sistema no ar: desconecta o Prisma, apaga journal/WAL do banco antigo (seriam aplicados ao novo), copia para um arquivo provisório e renomeia sobre o banco. Registro de auditoria "Restauracao" gravado no banco restaurado. Depois da restauração o administrador entra novamente.
+- A geração do .zip passou para `lib/backup.ts` (fonte única da tela, do backup de segurança e do novo comando `npm run backup -- [pasta]` em apps/api).
+- nginx em produção: a rota `/api/admin/restauracao` precisa de `client_max_body_size` maior (510m) — ver Parte 6 do docs/DEPLOY_HOSTINGER.md. Com o limite geral de 12m o envio é recusado pelo nginx (erro 413).
+- Testado numa cópia isolada do banco (instância separada da API): restauração por .zip e por .db, recusa sem confirmação, arquivo inválido, .zip sem banco.db, banco sem tabela do sistema e banco sem administrador ativo; contagens de dados iguais antes/depois. Cópia e backups de teste apagados.
+- Versão do sistema: 0.1.0 → 0.2.0.
