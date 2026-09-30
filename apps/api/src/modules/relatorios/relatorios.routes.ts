@@ -26,7 +26,8 @@ const FORMATOS = ["PDF", "XLSX", "CSV"] as const;
 type SnapshotGuardado = RelatorioSnapshot | RelatorioSnapshotLegado;
 
 function ehNovo(snapshot: SnapshotGuardado): snapshot is RelatorioSnapshot {
-  return (snapshot as RelatorioSnapshot).versao === 2;
+  const versao = (snapshot as RelatorioSnapshot).versao;
+  return versao === 2 || versao === 3;
 }
 
 function nomeArquivo(snapshot: SnapshotGuardado, formato: string): string {

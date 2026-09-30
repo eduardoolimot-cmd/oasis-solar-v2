@@ -35,21 +35,26 @@ function categorizarCodigoTempo(codigo: number): { categoria: DiaClima["categori
 interface RespostaDiaria {
   daily?: {
     time: string[];
-    weathercode: number[];
+    weathercode: (number | null)[];
     precipitation_sum: (number | null)[];
     temperature_2m_max: (number | null)[];
     temperature_2m_min: (number | null)[];
   };
 }
 
+/// Dias sem código de tempo ficam de fora: a Forecast API devolve os dias passados fora do seu
+/// alcance com tudo nulo, e esses dias vazios não podem substituir o dado do arquivo histórico (nem
+/// virar "Sem classificação" no painel).
 function montarDias(resposta: RespostaDiaria): DiaClima[] {
   const diario = resposta.daily;
   if (!diario) return [];
-  return diario.time.map((data, i) => {
-    const { categoria, rotulo } = categorizarCodigoTempo(diario.weathercode[i]);
+  return diario.time.flatMap((data, i) => {
+    const codigo = diario.weathercode[i];
+    if (codigo === null || codigo === undefined) return [];
+    const { categoria, rotulo } = categorizarCodigoTempo(codigo);
     return {
       data,
-      codigoTempo: diario.weathercode[i],
+      codigoTempo: codigo,
       categoria,
       rotulo,
       precipitacaoMm: diario.precipitation_sum[i] ?? null,
@@ -93,7 +98,7 @@ export async function buscarClimaDiario(latitude: number, longitude: number, ini
 
   const porData = new Map<string, DiaClima>();
   for (const dia of historico ?? []) porData.set(dia.data, dia);
-  for (const dia of previsao ?? []) porData.set(dia.data, dia); // forecast tem prioridade onde há sobreposição (dado mais recente)
+  for (const dia of previsao ?? []) porData.set(dia.data, dia); // forecast tem prioridade onde há sobreposição com dado (mais recente)
 
   return [...porData.values()].sort((a, b) => a.data.localeCompare(b.data));
 }
